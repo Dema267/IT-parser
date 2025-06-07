@@ -1,31 +1,33 @@
 import sqlite3
 from sqlite3 import Error
 import os
-from typing import Any
+from typing import Any, List, Optional, Dict
+from datetime import datetime
+import logging
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename='database.log'
+)
+logger = logging.getLogger(__name__)
 
 
-def get_db_path():
-    """Возвращает путь к базе данных."""
-    # Получаем абсолютный путь к директории парсеров
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    # Формируем путь к базе данных
-    db_path = os.path.join(base_dir, "..", "parsers", "vacancies.db")
-    return db_path
+def get_db_path() -> str:
+    """Возвращает путь к файлу базы данных"""
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vacancies.db')
 
 
-def create_connection() -> Any:
-    """Создает соединение с базой данных SQLite."""
-    conn = None
+def create_connection():
+    """Создает соединение с базой данных"""
     try:
-        conn = sqlite3.connect(
-            get_db_path()
-        )  # Используем правильный путь к базе данных
+        conn = sqlite3.connect(get_db_path())
+        conn.row_factory = sqlite3.Row
         return conn
-    except Error as e:
-        print(
-            f"Error of creating connection: {e}"
-        )  # Выводим сообщение об ошибке в консоль
-    return conn
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при создании соединения с БД: {e}")
+        raise
 
 
 def migrate_add_original_url_column(conn):
@@ -44,17 +46,34 @@ def migrate_add_original_url_column(conn):
         print(f"Ошибка миграции original_url: {e}")
 
 
-def initialize_database() -> None:
-    """Инициализирует базу данных и создает таблицы."""
-    conn = create_connection()
-    if conn is not None:
-        # Сначала создаём таблицу, если её нет
-        create_table(conn)
-        # Затем добавляем столбец original_url, если его нет
-        migrate_add_original_url_column(conn)
+def initialize_database():
+    """Инициализирует базу данных"""
+    try:
+        conn = create_connection()
+        cursor = conn.cursor()
+
+        # Создаем таблицу вакансий
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vacancies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                location TEXT NOT NULL,
+                salary TEXT,
+                description TEXT,
+                published_at DATETIME NOT NULL,
+                source TEXT NOT NULL,
+                original_url TEXT NOT NULL,
+                UNIQUE(title, company, published_at)
+            )
+        """)
+
+        conn.commit()
         conn.close()
-    else:
-        print("Error! cannot create the database connection.")
+        logger.info("База данных успешно инициализирована")
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации базы данных: {e}")
+        raise
 
 
 def create_table(conn) -> None:
@@ -82,113 +101,77 @@ def create_table(conn) -> None:
         print(f"Error of creating table: {e}")
 
 
-def insert_vacancy(vacancy) -> None:
-    """Добавляет вакансию в базу данных."""
-    conn = create_connection()
-    sql = """INSERT OR IGNORE INTO vacancies 
-             (title, company, location, salary, description, published_at, source, original_url)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
-    # Ensure original_url is a full URL
-    original_url = vacancy.original_url
-    if original_url and not original_url.startswith(("http://", "https://")):
-        original_url = "https://" + original_url.lstrip("/")
-    param = (
-        vacancy.title,
-        vacancy.company,
-        vacancy.location,
-        vacancy.salary,
-        vacancy.description,
-        vacancy.published_at.isoformat(),
-        vacancy.source,
-        original_url,
-    )
+def insert_vacancy(vacancy: Dict[str, Any]) -> bool:
+    """Добавляет вакансию в базу данных"""
     try:
+        conn = create_connection()
         cursor = conn.cursor()
-        cursor.execute(sql, param)
+        cursor.execute("""
+            INSERT OR IGNORE INTO vacancies (
+                title, company, location, salary, 
+                description, published_at, source, original_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            vacancy['title'],
+            vacancy['company'],
+            vacancy['location'],
+            vacancy.get('salary'),
+            vacancy.get('description', ''),
+            vacancy['published_at'],
+            vacancy['source'],
+            vacancy['original_url']
+        ))
         conn.commit()
-    except Error as e:
-        print(f"Error of inserting vacancy: {e}")
-        # логирование
-    finally:
         conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении вакансии: {e}")
+        return False
 
 
-def get_all_vacancies(
-    page: int = 1,
-    per_page: int = 10,
-    order_by: str = "id",
-    order_direction: str = "ASC",
-) -> list:
-    """Получает все вакансии из базы данных с поддержкой пагинации."""
-    conn = create_connection()
-    vacancies = []
+def get_all_vacancies() -> List[Dict[str, Any]]:
+    """Получает все вакансии из базы данных"""
     try:
+        conn = create_connection()
         cursor = conn.cursor()
-        offset = (page - 1) * per_page
-        cursor.execute(
-            f"SELECT * FROM vacancies ORDER BY {order_by} {order_direction} LIMIT ? OFFSET ?",
-            (per_page, offset),
-        )
-        rows = cursor.fetchall()
-        for row in rows:
-            vacancy = {
-                "id": row[0],
-                "title": row[1],
-                "company": row[2],
-                "location": row[3],
-                "salary": row[4],
-                "description": row[5],
-                "published_at": row[6],
-                "source": row[7],
-                "original_url": row[8],  # новое поле
-            }
-            vacancies.append(vacancy)
-    except Error as e:
-        print(f"Error of getting all vacancies: {e}")
-    finally:
+        cursor.execute("SELECT * FROM vacancies ORDER BY published_at DESC")
+        vacancies = [dict(row) for row in cursor.fetchall()]
         conn.close()
-    return vacancies
+        return vacancies
+    except Exception as e:
+        logger.error(f"Ошибка при получении всех вакансий: {e}")
+        return []
 
 
-def search_vacancies(query: str) -> list:
-    """Ищет вакансии по заданному запросу."""
-    conn = create_connection()
-    vacancies = []
+def search_vacancies(query: str) -> List[Dict[str, Any]]:
+    """Поиск вакансий по запросу"""
     try:
+        conn = create_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM vacancies WHERE title LIKE ? OR company LIKE ? OR location LIKE ?",
-            ("%" + query + "%", "%" + query + "%", "%" + query + "%"),
-        )
-        rows = cursor.fetchall()
-        for row in rows:
-            vacancy = {
-                "id": row[0],
-                "title": row[1],
-                "company": row[2],
-                "location": row[3],
-                "salary": row[4],
-                "description": row[5],
-                "published_at": row[6],
-                "source": row[7],
-                "original_url": row[8],  # новое поле
-            }
-            vacancies.append(vacancy)
-    except Error as e:
-        print(f"Error of searching vacancies: {e}")
-    finally:
+        search_pattern = f"%{query}%"
+        cursor.execute("""
+            SELECT * FROM vacancies 
+            WHERE title LIKE ? 
+            OR company LIKE ? 
+            OR description LIKE ?
+            ORDER BY published_at DESC
+        """, (search_pattern, search_pattern, search_pattern))
+        vacancies = [dict(row) for row in cursor.fetchall()]
         conn.close()
-    return vacancies
+        return vacancies
+    except Exception as e:
+        logger.error(f"Ошибка при поиске вакансий: {e}")
+        return []
 
 
 def get_filtered_vacancies(
-    query="",
-    location="",
-    company="",
-    page=1,
-    per_page=50,
-    order_by="id",
-    order_direction="DESC",
+        query="",
+        location="",
+        company="",
+        page=1,
+        per_page=50,
+        order_by="id",
+        order_direction="DESC",
 ) -> list:
     """
     Получает отфильтрованные вакансии из базы данных с поддержкой пагинации.
@@ -229,7 +212,7 @@ def get_filtered_vacancies(
                 "description": row[5],
                 "published_at": row[6],
                 "source": row[7],
-                "original_url": row[8],  # новое поле
+                "original_url": row[8],
             }
             vacancies.append(vacancy)
     except Error as e:
@@ -240,109 +223,137 @@ def get_filtered_vacancies(
 
 
 def get_total_vacancies_count(query="", location="", company="") -> int:
-    """
-    Возвращает общее количество вакансий, соответствующих заданным фильтрам.
-    Используется для пагинации.
-    """
-    conn = create_connection()
-    count = 0
-
+    """Возвращает общее количество вакансий"""
     try:
+        conn = create_connection()
         cursor = conn.cursor()
 
-        # Базовый SQL запрос для подсчета
+        # Базовый SQL запрос
         sql = "SELECT COUNT(*) FROM vacancies WHERE 1=1"
         params = []
 
-        # Добавляем условия для фильтрации
+        # Добавляем условия фильтрации
         if query:
-            sql += " AND (title LIKE ? OR company LIKE ? OR location LIKE ? OR description LIKE ?)"
-            params.extend(["%" + query + "%"] * 4)
+            sql += " AND (title LIKE ? OR company LIKE ? OR description LIKE ?)"
+            search_pattern = f"%{query}%"
+            params.extend([search_pattern] * 3)
 
         if location:
             sql += " AND location LIKE ?"
-            params.append("%" + location + "%")
+            params.append(f"%{location}%")
 
         if company:
             sql += " AND company LIKE ?"
-            params.append("%" + company + "%")
+            params.append(f"%{company}%")
 
-        # Выполняем запрос
         cursor.execute(sql, params)
         count = cursor.fetchone()[0]
-
-    except Error as e:
-        print(f"Error getting total vacancies count: {e}")
-    finally:
         conn.close()
-
-    return count
+        return count
+    except Exception as e:
+        logger.error(f"Ошибка при подсчете вакансий: {e}")
+        return 0
 
 
 def remove_duplicates() -> None:
-    """Удаляет повторяющиеся записи из таблицы vacancies."""
-    conn = create_connection()
-    if conn is not None:
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                DELETE FROM vacancies
-                WHERE id NOT IN (
-                    SELECT MIN(id)
-                    FROM vacancies
-                    GROUP BY title, company, published_at
-                );
-            """
-            )
-            conn.commit()
-            print("Дубликаты удалены успешно.")
-        except Error as e:
-            print(f"Ошибка при удалении дубликатов: {e}")
-        finally:
-            conn.close()
-    else:
-        print("Ошибка: не удалось подключиться к базе данных.")
+    """Удаляет дубликаты вакансий из базы данных"""
+    try:
+        conn = create_connection()
+        cursor = conn.cursor()
+
+        # Создаем временную таблицу с уникальными вакансиями
+        cursor.execute("""
+            CREATE TEMPORARY TABLE temp_vacancies AS
+            SELECT MIN(id) as id
+            FROM vacancies
+            GROUP BY title, company, published_at
+        """)
+
+        # Удаляем все вакансии, кроме тех, что в временной таблице
+        cursor.execute("""
+            DELETE FROM vacancies
+            WHERE id NOT IN (SELECT id FROM temp_vacancies)
+        """)
+
+        # Удаляем временную таблицу
+        cursor.execute("DROP TABLE temp_vacancies")
+
+        conn.commit()
+        conn.close()
+        logger.info("Дубликаты вакансий успешно удалены")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении дубликатов: {e}")
 
 
 def get_unique_sources() -> list:
-    """Возвращает список уникальных источников вакансий."""
-    conn = create_connection()
-    sources = []
+    """Получает список уникальных источников вакансий"""
     try:
+        conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT source FROM vacancies")
-        rows = cursor.fetchall()
-        sources = [row[0] for row in rows]
-    except Error as e:
-        print(f"Error getting unique sources: {e}")
-    finally:
+        sources = [row[0] for row in cursor.fetchall()]
         conn.close()
-    return sources
+        return sources
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка источников: {e}")
+        return []
 
 
 def get_unique_cities() -> list:
-    """Возвращает список уникальных городов из вакансий."""
-    conn = create_connection()
-    cities = []
+    """Получает список уникальных городов"""
     try:
+        conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT location FROM vacancies")
-        rows = cursor.fetchall()
-        cities = [row[0] for row in rows]
-    except Error as e:
-        print(f"Error getting unique cities: {e}")
-    finally:
+        cities = [row[0] for row in cursor.fetchall()]
         conn.close()
-    return cities
+        return cities
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка городов: {e}")
+        return []
+
+
+def get_vacancies(limit: int = 50) -> List[Dict[str, Any]]:
+    """Получает список вакансий с ограничением по количеству"""
+    try:
+        conn = create_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM vacancies ORDER BY published_at DESC LIMIT ?", (limit,))
+        vacancies = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return vacancies
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка вакансий: {e}")
+        return []
+
+
+def get_vacancy_by_id(vacancy_id: int) -> Optional[Dict[str, Any]]:
+    """Получает вакансию по ID"""
+    try:
+        conn = create_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM vacancies WHERE id = ?", (vacancy_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"Ошибка при получении вакансии по ID {vacancy_id}: {e}")
+        return None
+
+
+def get_vacancies_by_source(source: str) -> List[Dict[str, Any]]:
+    """Получает вакансии по источнику"""
+    try:
+        conn = create_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM vacancies WHERE source = ? ORDER BY published_at DESC", (source,))
+        vacancies = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return vacancies
+    except Exception as e:
+        logger.error(f"Ошибка при получении вакансий по источнику {source}: {e}")
+        return []
 
 
 if __name__ == "__main__":
-    # all_vacancies = get_all_vacancies()
-    # searching_vacancies = search_vacancies("Junior")
-    #
-    # for index, vacancy in enumerate(searching_vacancies, start=1):
-    #     if index > 10:
-    #         break
-    #     print(vacancy)
-    remove_duplicates()
+    initialize_database()

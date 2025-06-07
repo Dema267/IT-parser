@@ -1,11 +1,19 @@
-from flask import render_template, Blueprint, request
+from flask import Blueprint, render_template, request, jsonify
 from core.database import (
-    get_filtered_vacancies,
+    get_vacancies,
+    get_vacancy_by_id,
+    search_vacancies,
+    get_vacancies_by_source,
     get_total_vacancies_count,
     get_unique_sources,
     get_unique_cities,
+    remove_duplicates,
+    get_filtered_vacancies
 )
+import logging
+import traceback
 
+logger = logging.getLogger(__name__)
 bp = Blueprint("main", __name__)
 
 
@@ -71,144 +79,156 @@ def filter_vacancies(
 
 @bp.route("/")
 def index():
-    # Получаем статистику для главной страницы
-    stats = {
-        "total_vacancies": get_total_vacancies_count(),
-        "sources_count": len(get_unique_sources()),
-        "cities_count": len(get_unique_cities()),
-    }
-    return render_template("index.html", stats=stats)
+    """Главная страница"""
+    try:
+        logger.debug("Начало обработки запроса главной страницы")
+        # Получаем статистику для главной страницы
+        stats = {
+            "total_vacancies": get_total_vacancies_count(),
+            "sources_count": len(get_unique_sources()),
+            "cities_count": len(get_unique_cities()),
+        }
+        logger.debug(f"Статистика получена: {stats}")
+        return render_template("index.html", stats=stats)
+    except Exception as e:
+        logger.error(f"Ошибка при отображении главной страницы: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return "Ошибка сервера", 500
 
 
 @bp.route("/vacancies")
 def vacancies():
+    """Страница со списком вакансий"""
     try:
         # Получаем параметры фильтрации
-        query = request.args.get("query", "")
-        location = request.args.get("location", "")
-        company = request.args.get("company", "")
-        salary_min = request.args.get("salary_min", "")
-        salary_max = request.args.get("salary_max", "")
+        query = request.args.get('q', '')
+        location = request.args.get('location', '')
+        company = request.args.get('company', '')
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
+        order_by = request.args.get('order_by', 'published_at')
+        order_direction = request.args.get('order_direction', 'DESC')
+        source = request.args.get('source', '')
 
-        # Получаем параметр сортировки
-        sort = request.args.get("sort", "date")
-
-        # Определяем поле и направление сортировки
-        if sort == "salary":
-            order_by = "salary"  # Сортировка по зарплате
-        else:
-            order_by = "published_at"  # По умолчанию сортировка по дате
-
-        order_direction = "DESC"  # По умолчанию сортируем по убыванию (новые сверху)
-
-        # Получаем параметры пагинации
-        try:
-            page = max(1, int(request.args.get("page", 1)))
-        except (ValueError, TypeError):
-            page = 1
-
-        try:
-            per_page = min(100, max(10, int(request.args.get("per_page", 50))))
-        except (ValueError, TypeError):
-            per_page = 50
-
-        # Используем новые оптимизированные функции для работы с БД
-        current_vacancies = get_filtered_vacancies(
+        # Получаем отфильтрованные вакансии
+        vacancies = get_filtered_vacancies(
             query=query,
             location=location,
             company=company,
             page=page,
             per_page=per_page,
             order_by=order_by,
-            order_direction=order_direction,
+            order_direction=order_direction
         )
 
-        # Общее количество вакансий для пагинации
-        total_vacancies = get_total_vacancies_count(
-            query=query, location=location, company=company
-        )
+        # Получаем общее количество вакансий для пагинации
+        total_count = get_total_vacancies_count(query, location, company)
+        total_pages = (total_count + per_page - 1) // per_page
 
-        # Рассчитываем общее количество страниц
-        total_pages = max(1, (total_vacancies + per_page - 1) // per_page)
+        # Получаем списки для фильтров
+        sources = get_unique_sources()
+        cities = get_unique_cities()
 
-        # Если у нас есть фильтры по зарплате, применяем их постобработкой
-        # (так как зарплата хранится в текстовом формате и её сложно фильтровать в SQL)
-        if salary_min or salary_max:
-            current_vacancies = filter_vacancies(
-                current_vacancies,
-                query="",  # Основной поиск уже выполнен в SQL
-                location="",  # Локация уже отфильтрована в SQL
-                company="",  # Компания уже отфильтрована в SQL
-                salary_min=salary_min,
-                salary_max=salary_max,
-            )
-
-            # Если количество вакансий после фильтрации по зарплате сильно уменьшилось,
-            # возможно, нам понадобится получить дополнительные вакансии
-            if len(current_vacancies) < per_page // 2 and total_vacancies > per_page:
-                # Получаем больше вакансий для компенсации отфильтрованных
-                additional_vacancies = get_filtered_vacancies(
-                    query=query,
-                    location=location,
-                    company=company,
-                    page=page + 1,
-                    per_page=per_page,
-                    order_by=order_by,
-                    order_direction=order_direction,
-                )
-
-                # Фильтруем дополнительные вакансии и добавляем их к текущим
-                filtered_additional = filter_vacancies(
-                    additional_vacancies,
-                    query="",
-                    location="",
-                    company="",
-                    salary_min=salary_min,
-                    salary_max=salary_max,
-                )
-
-                current_vacancies.extend(filtered_additional)
-                # Ограничиваем количество вакансий до per_page
-                current_vacancies = current_vacancies[:per_page]
-
-        # Передаем данные в шаблон
         return render_template(
-            "vacancies.html",
-            vacancies=current_vacancies,
+            'vacancies.html',
+            vacancies=vacancies,
             query=query,
             location=location,
             company=company,
-            salary_min=salary_min,
-            salary_max=salary_max,
             page=page,
-            total_pages=total_pages,
             per_page=per_page,
-            total_vacancies=total_vacancies,
-            sort=sort,
+            total_pages=total_pages,
+            total_count=total_count,
+            sources=sources,
+            cities=cities,
+            current_source=source
         )
-
     except Exception as e:
-        # Логируем ошибку
-        import traceback
+        logger.error(f"Ошибка при отображении списка вакансий: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return "Ошибка сервера", 500
 
-        print(f"Ошибка при обработке запроса: {str(e)}")
-        print(traceback.format_exc())
-        # Возвращаем страницу с сообщением об ошибке
-        return (
-            render_template(
-                "vacancies.html",
-                vacancies=[],
-                query="",
-                location="",
-                company="",
-                salary_min="",
-                salary_max="",
-                page=1,
-                total_pages=1,
-                per_page=20,
-                total_vacancies=0,
-                sort="date",
-                error=f"Произошла ошибка при обработке запроса: {str(e)}",
-            ),
-            500,
+
+@bp.route("/search")
+def search():
+    """Поиск вакансий"""
+    try:
+        query = request.args.get('q', '')
+        if query:
+            results = search_vacancies(query)
+        else:
+            results = get_vacancies()
+        return render_template('vacancies.html', vacancies=results)
+    except Exception as e:
+        logger.error(f"Ошибка при поиске вакансий: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return "Ошибка сервера", 500
+
+
+@bp.route("/vacancy/<int:vacancy_id>")
+def vacancy_detail(vacancy_id):
+    """Детальная информация о вакансии"""
+    try:
+        vacancy = get_vacancy_by_id(vacancy_id)
+        if vacancy:
+            return render_template('vacancy_detail.html', vacancy=vacancy)
+        return "Вакансия не найдена", 404
+    except Exception as e:
+        logger.error(f"Ошибка при отображении деталей вакансии {vacancy_id}: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return "Ошибка сервера", 500
+
+
+@bp.route("/api/vacancies")
+def api_vacancies():
+    """API endpoint для получения списка вакансий"""
+    try:
+        query = request.args.get('q', '')
+        location = request.args.get('location', '')
+        company = request.args.get('company', '')
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
+
+        vacancies = get_filtered_vacancies(
+            query=query,
+            location=location,
+            company=company,
+            page=page,
+            per_page=per_page
         )
+
+        return jsonify({
+            'status': 'success',
+            'data': vacancies,
+            'total': get_total_vacancies_count(query, location, company)
+        })
+    except Exception as e:
+        logger.error(f"Ошибка в API /api/vacancies: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@bp.route("/api/vacancy/<int:vacancy_id>")
+def api_vacancy_detail(vacancy_id):
+    """API endpoint для получения деталей вакансии"""
+    try:
+        vacancy = get_vacancy_by_id(vacancy_id)
+        if vacancy:
+            return jsonify({
+                'status': 'success',
+                'data': vacancy
+            })
+        return jsonify({
+            'status': 'error',
+            'message': 'Vacancy not found'
+        }), 404
+    except Exception as e:
+        logger.error(f"Ошибка в API /api/vacancy/{vacancy_id}: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500

@@ -2,7 +2,6 @@ import requests
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
-import sqlite3
 from time import sleep
 from bs4 import BeautifulSoup
 import logging
@@ -36,7 +35,6 @@ class Vacancy:
 class FLParser:
     def __init__(self):
         self._init_session()
-        self._init_db()
 
     def _init_session(self):
         self.session = requests.Session()
@@ -47,28 +45,6 @@ class FLParser:
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive"
         })
-
-    def _init_db(self):
-        self.conn = sqlite3.connect("vacancies.db", check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self._create_table()
-
-    def _create_table(self):
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS vacancies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                company TEXT NOT NULL,
-                location TEXT NOT NULL,
-                salary TEXT,
-                description TEXT,
-                published_at DATETIME NOT NULL,
-                source TEXT NOT NULL,
-                original_url TEXT NOT NULL,
-                UNIQUE(title, company, published_at)
-            )
-        """)
-        self.conn.commit()
 
     def _parse_salary(self, text: str) -> Optional[str]:
         if not text or "Договорная" in text:
@@ -114,27 +90,6 @@ class FLParser:
             logger.error(f"Ошибка при парсинге страницы вакансии {url}: {e}")
             return {'description': ''}
 
-    def _save_vacancy(self, vacancy: Vacancy):
-        try:
-            self.cursor.execute("""
-                INSERT OR IGNORE INTO vacancies (
-                    title, company, location, salary, 
-                    description, published_at, source, original_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                vacancy.title,
-                vacancy.company,
-                vacancy.location,
-                vacancy.salary,
-                vacancy.description,
-                vacancy.published_at.isoformat(),
-                vacancy.source,
-                vacancy.original_url,
-            ))
-            self.conn.commit()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка сохранения в БД: {e}")
-
     def parse_vacancies(self, search_query: str = "Python") -> List[Vacancy]:
         """Основной метод парсинга вакансий"""
         vacancies = []
@@ -145,6 +100,8 @@ class FLParser:
         }
 
         try:
+            logger.info(f"Начало парсинга вакансий FL.ru с запросом '{search_query}'")
+
             page = 1
             while True:
                 params["page"] = page
@@ -194,7 +151,6 @@ class FLParser:
                             original_url=original_url
                         )
                         vacancies.append(vacancy)
-                        self._save_vacancy(vacancy)
                         logger.info(f"Обработана вакансия: {title}")
                     except Exception as e:
                         logger.error(f"Ошибка при обработке вакансии: {e}")
@@ -202,13 +158,13 @@ class FLParser:
                 page += 1
                 sleep(REQUEST_DELAY)
 
+            logger.info(f"Парсинг FL.ru завершен. Найдено {len(vacancies)} вакансий")
+
         except Exception as e:
-            logger.error(f"Критическая ошибка парсинга: {e}")
+            logger.error(f"Критическая ошибка парсинга FL.ru: {e}")
         finally:
             return vacancies
 
     def __del__(self):
         if hasattr(self, "session"):
             self.session.close()
-        if hasattr(self, "conn"):
-            self.conn.close()
